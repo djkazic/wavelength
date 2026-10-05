@@ -9,10 +9,76 @@ import (
 	"github.com/lightninglabs/wavelength/vtxo"
 )
 
-// legacyCommitmentHeightRepairTimeout bounds the optional post-ready indexer
-// maintenance so a slow or unavailable indexer cannot hold its startup worker
-// indefinitely.
-const legacyCommitmentHeightRepairTimeout = 30 * time.Second
+const (
+	// legacyCommitmentHeightRepairTimeout bounds one maintenance pass so
+	// an unavailable indexer cannot hold the worker indefinitely.
+	legacyCommitmentHeightRepairTimeout = 30 * time.Second
+
+	// legacyCommitmentHeightRepairInterval leaves room for live indexer
+	// traffic between passes through the remaining legacy inventory.
+	legacyCommitmentHeightRepairInterval = time.Minute
+)
+
+// startLegacyCommitmentHeightRepair starts daemon-owned maintenance after the
+// startup publication barrier. Its cleanup cancels and joins the worker before
+// wallet, transport, or database teardown, including on startup failure.
+func (s *Server) startLegacyCommitmentHeightRepair(
+	runCtx context.Context) func() {
+
+	ctx, cancel := context.WithCancel(runCtx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		select {
+		case <-s.DaemonReady():
+		case <-ctx.Done():
+			return
+		}
+
+		for ctx.Err() == nil {
+			repairCtx, repairCancel := context.WithTimeout(
+				ctx, legacyCommitmentHeightRepairTimeout,
+			)
+			err := s.repairLegacyCommitmentHeights(repairCtx)
+			repairCancel()
+			if ctx.Err() != nil {
+				return
+			}
+			if err == nil {
+				s.log.InfoS(
+					ctx, "Legacy VTXO "+
+						"commitment-height repair "+
+						"complete",
+				)
+
+				return
+			}
+
+			s.log.InfoS(ctx, "Legacy VTXO commitment-height repair "+
+				"incomplete; retry scheduled",
+				slog.String("error", err.Error()),
+				slog.Duration(
+					"retry_in",
+					legacyCommitmentHeightRepairInterval,
+				),
+			)
+
+			select {
+			case <-s.clk.TickAfter(
+				legacyCommitmentHeightRepairInterval,
+			):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
 
 // repairLegacyCommitmentHeights refreshes commitment confirmation heights for
 // active VTXOs written before that field was persisted. It runs as bounded
@@ -76,6 +142,7 @@ func (s *Server) repairLegacyCommitmentHeights(ctx context.Context) error {
 	}
 
 	var (
+		completedTargets  int
 		repairedTargets   int
 		repairedFragments int
 		failedTargets     int
@@ -84,6 +151,14 @@ func (s *Server) repairLegacyCommitmentHeights(ctx context.Context) error {
 	for _, desc := range targets {
 		if !hasUnknownCommitmentHeight(desc) {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			failedTargets = candidateCount - completedTargets
+			if firstErr == nil {
+				firstErr = err
+			}
+
+			break
 		}
 
 		extras, fetchErr := fetcher(
@@ -117,6 +192,7 @@ func (s *Server) repairLegacyCommitmentHeights(ctx context.Context) error {
 			repairedTargets++
 			repairedFragments += repaired
 		}
+		completedTargets++
 	}
 
 	if repairedTargets > 0 {
