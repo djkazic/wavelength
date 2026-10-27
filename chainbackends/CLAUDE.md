@@ -77,6 +77,19 @@ estimation, and optional v3 package relay via a pluggable `PackageSubmitter`.
   `chainbackends/lndsubmitter.New(lndSvc.WalletKit)` as the default.
 - `LndClientChainNotifier` enforces a 15-second timeout on registration to
   prevent hanging under LND block load.
+- **All `LndClientChainNotifier` block epoch registrations share one lnd
+  stream** (`blockEpochHub`, `block_epoch_hub.go`). Every live VTXO actor and
+  finality watch subscribes, so one stream per registration meant hundreds of
+  gRPC streams and identical `GetBlockHash` calls per block. The hub opens the
+  stream on demand, resolves each height once (retrying a failed lookup until
+  a newer height supersedes it), and gives a late joiner the cached tip first,
+  as lnd does on a fresh stream. Each registration has an unbounded queue, so
+  a wedged consumer neither blocks the others nor loses epochs; the backlog
+  lnd held per client now lives here. When the stream ends every registration
+  closes and its owner reconnects, which opens a new stream. Subscribers belong
+  to the stream generation they joined, so an old generation never closes a
+  newer one's subscribers. `Stop` cancels any in-flight open, closes every
+  registration, and joins all hub goroutines before returning.
 - Log messages use canonical txid strings (not reversed byte slices).
 - **`ReplacementFeeConstraints` fields are individually optional and
   best-effort.** They are scraped from Bitcoin Core's human-readable
