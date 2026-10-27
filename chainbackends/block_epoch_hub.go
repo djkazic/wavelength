@@ -57,7 +57,9 @@ var errNotifierStopped = errors.New("chain notifier stopped")
 //     cancel.
 type blockEpochHub struct {
 	lnd *lndclient.LndServices
-	log btclog.Logger
+
+	// log resolves the logger for a context.
+	log func(context.Context) btclog.Logger
 
 	mu sync.Mutex
 
@@ -135,7 +137,7 @@ type epochSub struct {
 
 // newBlockEpochHub returns a hub that opens its stream through lnd.
 func newBlockEpochHub(lnd *lndclient.LndServices,
-	log btclog.Logger) *blockEpochHub {
+	log func(context.Context) btclog.Logger) *blockEpochHub {
 
 	return &blockEpochHub{
 		lnd: lnd,
@@ -244,7 +246,7 @@ func (h *blockEpochHub) open(attempt *epochOpen) (*chainntnfs.BlockEpochEvent,
 	close(attempt.done)
 	h.mu.Unlock()
 
-	h.log.InfoS(up.ctx, "Opened shared block epoch stream")
+	h.log(up.ctx).InfoS(up.ctx, "Opened shared block epoch stream")
 
 	return event, nil
 }
@@ -324,6 +326,7 @@ func (h *blockEpochHub) runUpstream(up *epochUpstream, heightChan chan int32,
 	defer h.endUpstream(up)
 
 	ctx := up.ctx
+	log := h.log(ctx)
 
 	var (
 		retry      *time.Timer
@@ -348,7 +351,7 @@ func (h *blockEpochHub) runUpstream(up *epochUpstream, heightChan chan int32,
 		blockHash, err := chainKit.GetBlockHash(ctx, int64(tipHeight))
 		if err != nil {
 			if isBlockEpochShutdownError(ctx, err) {
-				h.log.DebugS(ctx, "Block hash lookup cancelled "+
+				log.DebugS(ctx, "Block hash lookup cancelled "+
 					"during stream shutdown",
 					slog.Any("err", err),
 					slog.Int("height", int(tipHeight)),
@@ -357,7 +360,7 @@ func (h *blockEpochHub) runUpstream(up *epochUpstream, heightChan chan int32,
 				return
 			}
 
-			h.log.WarnS(ctx, "Failed to get block hash",
+			log.WarnS(ctx, "Failed to get block hash",
 				err,
 				slog.Int("height", int(tipHeight)),
 				slog.Duration("retry_in", backoff),
@@ -381,12 +384,12 @@ func (h *blockEpochHub) runUpstream(up *epochUpstream, heightChan chan int32,
 		select {
 		case height, ok := <-heightChan:
 			if !ok {
-				h.log.InfoS(ctx, "Height channel closed")
+				log.InfoS(ctx, "Height channel closed")
 
 				return
 			}
 
-			h.log.InfoS(ctx, "Received height from lndclient",
+			log.InfoS(ctx, "Received height from lndclient",
 				slog.Int("height", int(height)),
 			)
 
@@ -410,12 +413,12 @@ func (h *blockEpochHub) runUpstream(up *epochUpstream, heightChan chan int32,
 		case err, ok := <-errChan:
 			if ok && err != nil {
 				if isBlockEpochShutdownError(ctx, err) {
-					h.log.DebugS(ctx, "Block epoch "+
+					log.DebugS(ctx, "Block epoch "+
 						"subscription cancelled",
 						slog.Any("err", err),
 					)
 				} else {
-					h.log.WarnS(ctx, "Block epoch error",
+					log.WarnS(ctx, "Block epoch error",
 						err,
 					)
 				}
@@ -471,7 +474,7 @@ func (h *blockEpochHub) endUpstream(up *epochUpstream) {
 		sub.stop()
 	}
 
-	h.log.InfoS(up.ctx, "Shared block epoch stream closed",
+	h.log(up.ctx).InfoS(up.ctx, "Shared block epoch stream closed",
 		slog.Int("subscribers", len(subs)),
 	)
 }

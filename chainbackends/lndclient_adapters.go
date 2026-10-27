@@ -135,7 +135,7 @@ func NewLndClientChainNotifier(
 	n := &LndClientChainNotifier{
 		cfg: cfg,
 	}
-	n.epochs = newBlockEpochHub(cfg.LND, n.logger(context.Background()))
+	n.epochs = newBlockEpochHub(cfg.LND, n.logger)
 
 	return n
 }
